@@ -1,0 +1,93 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Student Information</title>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background-color: #f4f7fb;
+            color: #1e293b;
+            min-height: 100vh;
+        }
+
+        header {
+            background: linear-gradient(135deg, #172554, #1e40af);
+            color: #ffffff;
+            padding: 32px 40px;
+            border-bottom: 4px solid #60a5fa;
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+        }
+
+        .student-info {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        .student-name {
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+            margin-bottom: 10px;
+        }
+
+        .student-id {
+            font-size: 15px;
+            color: #dbeafe;
+            letter-spacing: 0.5px;
+        }
+
+        main {
+            max-width: 1100px;
+            margin: 40px auto;
+            padding: 0 40px;
+        }
+
+        .content-panel {
+            min-height: 180px;
+            background-color: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+        }
+
+        @media (max-width: 600px) {
+            header {
+                padding: 26px 22px;
+            }
+
+            .student-name {
+                font-size: 21px;
+            }
+
+            main {
+                padding: 0 22px;
+                margin-top: 28px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="student-info">
+            <h1 class="student-name">Student: John Doe</h1>
+            <p class="student-id">Student ID: 123456789</p>
+        </div>
+    </header>
+
+    <main>
+        <section class="content-panel" aria-label="Main content">
+        </section>
+    </main>
+</body>
+</html>

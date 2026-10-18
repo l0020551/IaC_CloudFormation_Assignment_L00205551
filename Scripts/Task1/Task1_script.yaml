@@ -27,7 +27,47 @@ Parameters: ## using the same parameters as the latest cloudformations example
 
 ## As the task follows the majority of the tutorial regarding exposing to the web resources can remain the same.
 ## instead of echoing "Hello World!" we can simply cat the content of a file in a mounted S3 bucket. 
+
 Resources:
+
+  WebsiteContentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: iac-assign1-task1-l00205551-2
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Amazon Q suggestion IAM Role so EC2 can read from S3
+  WebServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WebServerRole
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      
+
+   
+### end of Amazon Q recommendation
+
   WebServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -45,11 +85,32 @@ Resources:
       InstanceType: !Ref InstanceType
       SecurityGroupIds:
         - !Ref WebServerSecurityGroup
-      UserData: !Base64 |
-        #!/bin/bash
-        yum update -y
-        yum install -y httpd
-        systemctl start httpd
-        systemctl enable httpd
-        ## replace this echo with a cat of a file in the s3 bucket
-        echo "<html><body><h1>Student: Ruairí Ó hÓgartaigh\nID: L00205551 </h1></body></html>" > /var/www/html/index.html
+      IamInstanceProfile: !Ref WebServerInstanceProfile  # <-- must be here
+      # UserData: !Base64 |
+      #   #!/bin/bash
+      #   yum update -y
+      #   yum install -y httpd
+      #   systemctl start httpd
+      #   systemctl enable httpd
+      #   # Copy the HTML file from S3 directly to the web root
+      #   aws s3 cp s3://${iac-assign1-task1-l00205551}/s3_student_info.html /var/www/html/index.html
+      #   cat /mnt/s3_student_info.html
+      UserData:
+        Fn::Base64:
+          !Sub |                          # <-- !Sub resolves ${WebsiteContentBucket}
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            aws s3 cp s3://${WebsiteContentBucket}/s3_student_info.html /var/www/html/index.html
+
+
+
+Outputs:
+  WebsiteURL:
+    Value: !Join
+      - ''
+      - - http://
+        - !GetAtt WebServer.PublicDnsName
+    Description: Website URL
