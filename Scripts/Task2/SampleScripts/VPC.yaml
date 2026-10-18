@@ -1,0 +1,484 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  3-Tier Architecture with VPC, ALB (private), EC2 Auto Scaling,
+  Aurora MySQL, WAF, and CloudFront VPC Origin in eu-west-1
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ThreeTierApp
+    Description: Prefix for all resource names
+
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI (auto-resolved)
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access via Bastion
+
+  DBName:
+    Type: String
+    Default: appdb
+
+  DBUsername:
+    Type: String
+    Default: admin
+    NoEcho: true
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: '8'
+    Description: Aurora master password (min 8 characters)
+
+  DBInstanceType:
+    Type: String
+    Default: db.r5.large
+
+Mappings:
+  SubnetConfig:
+    Public1:   { CIDR: 10.0.1.0/24 }
+    Public2:   { CIDR: 10.0.2.0/24 }
+    Private1:  { CIDR: 10.0.10.0/24 }
+    Private2:  { CIDR: 10.0.11.0/24 }
+    Isolated1: { CIDR: 10.0.20.0/24 }
+    Isolated2: { CIDR: 10.0.21.0/24 }
+
+Resources:
+
+  # ─── NETWORKING ────────────────────────────────────────────────────────────
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-VPC" }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-IGW" }]
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (NAT Gateways live here)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Public1, CIDR]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Public-AZ1" }]
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Public2, CIDR]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Public-AZ2" }]
+
+  # Private App Subnets (EC2 / ALB)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Private1, CIDR]
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Private-AZ1" }]
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Private2, CIDR]
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Private-AZ2" }]
+
+  # Isolated DB Subnets
+  IsolatedSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Isolated1, CIDR]
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Isolated-AZ1" }]
+
+  IsolatedSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !FindInMap [SubnetConfig, Isolated2, CIDR]
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Isolated-AZ2" }]
+
+  # NAT Gateways (one per AZ for HA)
+  NATGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties: { Domain: vpc }
+
+  NATGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties: { Domain: vpc }
+
+  NATGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NATGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-PublicRT" }]
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { RouteTableId: !Ref PublicRouteTable, SubnetId: !Ref PublicSubnet1 }
+
+  PublicSubnet2RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { RouteTableId: !Ref PublicRouteTable, SubnetId: !Ref PublicSubnet2 }
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-PrivateRT-AZ1" }]
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway1
+
+  PrivateSubnet1RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { RouteTableId: !Ref PrivateRouteTable1, SubnetId: !Ref PrivateSubnet1 }
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-PrivateRT-AZ2" }]
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway2
+
+  PrivateSubnet2RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { RouteTableId: !Ref PrivateRouteTable2, SubnetId: !Ref PrivateSubnet2 }
+
+  IsolatedRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-IsolatedRT" }]
+
+  IsolatedSubnet1RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { RouteTableId: !Ref IsolatedRouteTable, SubnetId: !Ref IsolatedSubnet1 }
+
+  IsolatedSubnet2RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { RouteTableId: !Ref IsolatedRouteTable, SubnetId: !Ref IsolatedSubnet2 }
+
+  # ─── SECURITY GROUPS ───────────────────────────────────────────────────────
+
+  # ALB SG — only accepts traffic from CloudFront managed prefix list
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB - allow inbound from CloudFront only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: pl-4fa04526   # CloudFront managed prefix list (eu-west-1)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourcePrefixListId: pl-4fa04526
+
+  # EC2 SG — only accepts traffic from ALB
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 App Tier - allow from ALB only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastionSecurityGroup
+
+  # Bastion SG
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Bastion Host SSH access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0   # Restrict to your IP in production
+
+  # DB SG — only accepts traffic from EC2 app tier
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Aurora - allow from EC2 app tier only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+
+  # ─── PRESENTATION TIER: ALB (internal, in private subnets) ─────────────────
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${EnvironmentName}-ALB"
+      Scheme: internal                  # Private — accessed only via CloudFront VPC Origin
+      SecurityGroups: [!Ref ALBSecurityGroup]
+      Subnets: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      Type: application
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-TG"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ─── APPLICATION TIER: EC2 Auto Scaling ────────────────────────────────────
+
+  AppInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Enables Session Manager
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref AppInstanceRole]
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile: { Arn: !GetAtt AppInstanceProfile.Arn }
+        SecurityGroupIds: [!Ref EC2SecurityGroup]
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            echo "<h1>Hello from ${EnvironmentName} - $(hostname -f)</h1>" > /var/www/html/index.html
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: '2'
+      MaxSize: '6'
+      DesiredCapacity: '2'
+      TargetGroupARNs: [!Ref ALBTargetGroup]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+
+  # ─── BASTION HOST ───────────────────────────────────────────────────────────
+
+  BastionHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds: [!Ref BastionSecurityGroup]
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Bastion" }]
+
+  # ─── DATA TIER: Aurora MySQL ────────────────────────────────────────────────
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Isolated subnets for Aurora
+      SubnetIds: [!Ref IsolatedSubnet1, !Ref IsolatedSubnet2]
+
+  DBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      Engine: aurora-mysql
+      EngineVersion: '8.0.mysql_aurora.3.04.0'
+      DatabaseName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds: [!Ref DBSecurityGroup]
+      StorageEncrypted: true
+      DeletionProtection: false   # Set true for production
+
+  DBInstance1:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceClass: !Ref DBInstanceType
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+  DBInstance2:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceClass: !Ref DBInstanceType
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+  # ─── CLOUDFRONT VPC ORIGIN ─────────────────────────────────────────────────
+  # Note: AWS::CloudFront::VpcOrigin and AWS::CloudFront::Distribution
+  # are global resources but are deployed via us-east-1 internally by AWS.
+  # You can include them in this same template — CloudFormation handles it.
+
+  CloudFrontVpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    DependsOn: ApplicationLoadBalancer
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub "${EnvironmentName}-VpcOrigin"
+        Arn: !Ref ApplicationLoadBalancer
+        HTTPPort: 80
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-VpcOrigin"
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: CloudFrontVpcOrigin
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${EnvironmentName} 3-Tier CloudFront Distribution"
+        DefaultCacheBehavior:
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          TargetOriginId: ALBVpcOrigin
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled (for dynamic apps)
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader
+        Origins:
+          - Id: ALBVpcOrigin
+            DomainName: !GetAtt ApplicationLoadBalancer.DNSName
+            VpcOriginConfig:
+              VpcOriginId: !GetAtt CloudFrontVpcOrigin.Id
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+        HttpVersion: http2
+        PriceClass: PriceClass_100   # US, Canada, Europe
+
+# ─── OUTPUTS ───────────────────────────────────────────────────────────────
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export: { Name: !Sub "${EnvironmentName}-VPC-ID" }
+
+  ALBDNSName:
+    Description: Internal ALB DNS (not publicly accessible)
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  CloudFrontDomain:
+    Description: CloudFront Distribution Domain — use this as your app URL
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  DBEndpoint:
+    Description: Aurora Cluster Writer Endpoint
+    Value: !GetAtt DBCluster.Endpoint.Address
+
+  BastionPublicIP:
+    Description: Bastion Host Public IP for SSH access
+    Value: !GetAtt BastionHost.PublicIp

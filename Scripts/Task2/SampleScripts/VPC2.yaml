@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 3-Tier App - Web Server, App Server (curl), RDS MySQL
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: MyWebApp
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  InstanceType:
+    Type: String
+    Default: t3.micro   ## alter so t2 may be selected too
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access    ### generated manual keypair used on initialisation
+  ExternalURL:
+    Type: String
+    Default: https://jsonplaceholder.typicode.com/posts/1   ### this task will be changed for a script loaded form the s3 that will be integrated.
+    Description: The external URL the app server will curl  ### to make the app work, this  will need to be updated to the met eireann api site so the app can access it. 
+
+  DBName:
+    Type: String
+    Default: appdb
+
+  DBUsername:
+    Type: String
+    Default: admin
+    NoEcho: true
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: '8'
+
+Resources:
+
+  # ─── VPC ───────────────────────────────────────────────────────────────────
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-VPC" }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public subnet — web server lives here
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Public" }]
+
+  # Private subnet — app server and DB live here
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Private-AZ1" }]
+
+  # Second private subnet required by RDS subnet group
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.3.0/24
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Private-AZ2" }]
+
+  # Public route table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  # NAT Gateway — allows the private app server to curl external URLs
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties: { Domain: vpc }
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet1RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  # ─── SECURITY GROUPS ───────────────────────────────────────────────────────
+
+  # Tier 1 — Web server: HTTP from internet, SSH from anywhere
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web server - HTTP and SSH
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: 0.0.0.0/0 }
+
+  # Tier 2 — App server: only accepts requests from web server on port 8080
+  AppServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App server - accept from web server only 
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref WebServerSG
+
+  # Tier 3 — RDS: only accepts MySQL from app server
+  DBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS MySQL - allow from app server only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppServerSG
+
+  # ─── TIER 1: WEB SERVER (public subnet) ────────────────────────────────────
+  # Polls the app server every 30 seconds, displays the result as a webpage
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    DependsOn: AppServer
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref WebServerSG]
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-WebServer" }]
+      UserData:
+        Fn::Base64: !Sub |   ### this will change to a bash/python and html script  in a connected s3 bucket
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+
+          # Create a script that polls the app server and updates the webpage
+          cat > /usr/local/bin/fetch-data.sh <<'SCRIPT'
+          #!/bin/bash
+          APP_SERVER_IP="${AppServer.PrivateIp}"
+          RESPONSE=$(curl -s --max-time 5 http://$APP_SERVER_IP:8080/fetch)
+
+          cat > /var/www/html/index.html <<EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>${EnvironmentName}</title>
+            <meta http-equiv="refresh" content="30">
+            <style>
+              body { font-family: Arial, sans-serif; background: #f4f4f4;
+                     display: flex; justify-content: center; align-items: center;
+                     min-height: 100vh; margin: 0; }
+              .card { background: white; padding: 40px; border-radius: 10px;
+                      box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 800px; width: 100%; }
+              h1 { color: #232f3e; }
+              pre { background: #f0f0f0; padding: 15px; border-radius: 5px;
+                    overflow-x: auto; white-space: pre-wrap; }
+              .timestamp { color: #888; font-size: 0.85em; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>${EnvironmentName}</h1>
+              <p class="timestamp">Last fetched: $(date)</p>
+              <h3>Data from App Server (curled from external URL):</h3>
+              <pre>$RESPONSE</pre>
+            </div>
+          </body>
+          </html>
+          EOF
+          SCRIPT
+
+          chmod +x /usr/local/bin/fetch-data.sh
+
+          # Run immediately and then every 30 seconds via cron
+          /usr/local/bin/fetch-data.sh
+          echo "* * * * * root /usr/local/bin/fetch-data.sh" >> /etc/crontab
+          echo "* * * * * root sleep 30 && /usr/local/bin/fetch-data.sh" >> /etc/crontab
+
+  # ─── TIER 2: APP SERVER (private subnet) ───────────────────────────────────
+  # Runs a Python Flask API on port 8080
+  # GET /fetch  → curls the external URL, writes to DB, returns the data
+
+  AppServer:
+    Type: AWS::EC2::Instance
+    DependsOn: Database
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds: [!Ref AppServerSG]
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-AppServer" }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash      /// this  will be updated to a bash script in an s3 bucket. 
+          yum update -y
+          yum install -y python3 python3-pip
+          pip3 install flask requests pymysql
+
+          # Write the Flask app
+          cat > /home/ec2-user/app.py <<'PYEOF'
+          from flask import Flask, jsonify
+          import requests
+          import pymysql
+          import datetime
+
+          app = Flask(__name__)
+
+          DB_HOST = "${Database.Endpoint.Address}"
+          DB_USER = "${DBUsername}"
+          DB_PASS = "${DBPassword}"
+          DB_NAME = "${DBName}"
+          EXTERNAL_URL = "${ExternalURL}"
+
+          def get_db():
+              return pymysql.connect(
+                  host=DB_HOST, user=DB_USER,
+                  password=DB_PASS, database=DB_NAME,
+                  cursorclass=pymysql.cursors.DictCursor
+              )
+
+          def init_db():
+              try:
+                  conn = get_db()
+                  with conn.cursor() as cur:
+                      cur.execute("""
+                          CREATE TABLE IF NOT EXISTS fetched_data (
+                              id INT AUTO_INCREMENT PRIMARY KEY,
+                              url VARCHAR(500),
+                              response TEXT,
+                              fetched_at DATETIME
+                          )
+                      """)
+                  conn.commit()
+                  conn.close()
+              except Exception as e:
+                  print(f"DB init error: {e}")
+
+          @app.route('/fetch')
+          def fetch():
+              try:
+                  # Curl the external URL
+                  resp = requests.get(EXTERNAL_URL, timeout=5)
+                  data = resp.text
+
+                  # Write result to database
+                  conn = get_db()
+                  with conn.cursor() as cur:
+                      cur.execute(
+                          "INSERT INTO fetched_data (url, response, fetched_at) VALUES (%s, %s, %s)",
+                          (EXTERNAL_URL, data, datetime.datetime.now())
+                      )
+                  conn.commit()
+                  conn.close()
+
+                  return data, 200, {'Content-Type': 'text/plain'}
+              except Exception as e:
+                  return str(e), 500
+
+          if __name__ == '__main__':
+              init_db()
+              app.run(host='0.0.0.0', port=8080)
+          PYEOF
+
+          # Run the Flask app as a service
+          cat > /etc/systemd/system/appserver.service <<'SVC'
+          [Unit]
+          Description=App Server
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/bin/python3 /home/ec2-user/app.py
+          Restart=always
+          User=ec2-user
+
+          [Install]
+          WantedBy=multi-user.target
+          SVC
+
+          systemctl daemon-reload
+          systemctl enable appserver
+          systemctl start appserver
+
+  # ─── TIER 3: RDS MYSQL (private subnet) ────────────────────────────────────
+  
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for RDS
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+
+  Database:                       // this will mostly go unchanged.
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-db"
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: '8.0'
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: '20'
+      StorageType: gp2
+      MultiAZ: false
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref DBSG]
+      DeletionProtection: false
+
+Outputs:
+  WebsiteURL:
+    Description: Your website URL
+    Value: !Sub "http://${WebServer.PublicIp}"
+
+  AppServerPrivateIP:
+    Description: App server private IP (not publicly accessible)
+    Value: !GetAtt AppServer.PrivateIp
+
+  DBEndpoint:
+    Description: MySQL database endpoint
+    Value: !GetAtt Database.Endpoint.Address
