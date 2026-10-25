@@ -105,3 +105,35 @@ On reviewing this script it has some useful content including VPC and database i
 After probing the LLM further, a script close enough to the desired structure was generated. While it doesn't match, it contains the main building blocks that the final script should incorporate to run. This script can be found [here](./Scripts/Task2/SampleScripts/VPC2.yaml). Comments have been added for how these segments may fit together in the final script. 
 
 --- 
+
+**Date:** October 25th, 2026  
+### Updates
+During the week Amazon gave a notification as follows:[aws_notification](./screenshots/aws_notification.png)
+
+The Linux version used in some scripts ran the previous week are out of support. The scripts need to be checked. 
+On reviewing active repository scripts the EC2instances are already running the AL2 successor; AL2023 or the latest Amazon image release `'/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'`.
+
+### Update to task 1
+In the first working iteration, an s3 container is generated in the stack, The webpage html needs to be manually updated while the stack checks for an upload.
+This is inefficient. In the next iteration it will refence an exising s3 container. This will mean the userdata will not require a loop to check if a file has been added to the s3 bucket. Instead it will recall the file from an existing bucket. This script in this commit and push does this. 
+
+### Task2 
+Last week a script with a VPC template was generated. now it will be implemented. As  mentioned in the previous section, application scripts will be recalled from an existing s3 bucket. 
+
+After spending hours debugging, the task has been broken down into to stages, 
+ * Stage 1: GUI and appliation unning.
+ * Stage 2: database integration. 
+
+
+**Date:** October 25th, 2026  Recap:
+
+* Updated task1 script to recall from existing s3 bucket.
+* Added parameters for s3 buckets in both scripts 
+* Reviewed instances and checked that they are still supported after notification from AWS.
+* Added more content for task2, html and python scripts etc. 
+* accessed ec2 terminal for debugging issues
+
+### Next stage
+ * Get python script running in EC2
+ * push updates to webpage
+ * push changes to database. 

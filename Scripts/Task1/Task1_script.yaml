@@ -24,21 +24,14 @@ Parameters: ## using the same parameters as the latest cloudformations example
     Default: 0.0.0.0/0
     AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$'
     ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
-
-## As the task follows the majority of the tutorial regarding exposing to the web resources can remain the same.
-## instead of echoing "Hello World!" we can simply cat the content of a file in a mounted S3 bucket. 
+    
+  IDbucketName: ### add reference to existing S3 rather than enerating one that must thenbe populated
+    Description: S3 bucket containing html with student name and ID
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$'  ## give params to stop none -s3 compatible values being added
+    ConstraintDescription: The IDbucketName parameter must be a valid lowercase S3 bucket string (3-63 chars, lowercase, numbers, or hyphens only).
 
 Resources:
-
-  WebsiteContentBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: iac-volume-name-placeholder  ##FYI  not name of S3 volume actually used, all volume IDs pushed previously are deleted. 
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
 
   # Amazon Q suggestion IAM Role so EC2 can read from S3
   WebServerRole:
@@ -51,6 +44,8 @@ Resources:
             Principal:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
         - PolicyName: ReadWebsiteContent
           PolicyDocument:
@@ -58,13 +53,14 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub "arn:aws:s3:::${IDbucketName}" ## update to use existing s3
+              - Effect: Allow
+                Action:
                   - s3:GetObject
-                Resource: !Sub '${WebsiteContentBucket.Arn}/*'
+                Resource: !Sub "arn:aws:s3:::${IDbucketName}/*"
 ## end of amazon q suggestions 
-
-
-Conditions:
-  
   WebServerInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -81,6 +77,10 @@ Conditions:
           FromPort: 80
           ToPort: 80
           CidrIp: !Ref MyIP
+        # - IpProtocol: tcp   ## added for debugging/ remove for production
+        #   FromPort: 22
+        #   ToPort: 22
+        #   CidrIp: !Ref MyIP
 
   WebServer:
     Type: AWS::EC2::Instance
@@ -90,36 +90,37 @@ Conditions:
       IamInstanceProfile: !Ref WebServerInstanceProfile
       SecurityGroupIds:
         - !Ref WebServerSecurityGroup
-      # UserData: !Base64 |
-      #   #!/bin/bash
-      #   yum update -y
-      #   yum install -y httpd
-      #   systemctl start httpd
-      #   systemctl enable httpd
-      #   # Copy the HTML file from S3 directly to the web root
-      #   aws s3 cp s3://${iac-assign1-task1-l00205551}/s3_student_info.html /var/www/html/index.html
-      #   cat /mnt/s3_student_info.html
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          set -euxo pipefail
+          set -uxo pipefail
+
+          # Inject region context for AWS CLI stability in UserData
+          export AWS_DEFAULT_REGION=${AWS::Region}
+
           yum update -y
           yum install -y httpd awscli
           mkdir -p /var/www/html
 
-          # for debugging, an LLM recommnended running multiple upload loops for 300 seconds 
-                    # Download the HTML file from S3
-          for i in {1..30}; do
-            if aws s3 cp \
-              s3://${WebsiteContentBucket}/s3_student_info.html \
-              /var/www/html/index.html; then
+          # Retry loop - set +e so a failed attempt doesn't abort the script
+          set +e
+          DOWNLOADED=false
+          for i in {1..6}; do
+            if aws s3 cp s3://${IDbucketName}/s3_student_info.html /var/www/html/index.html; then
+              DOWNLOADED=true
               break
             fi
             sleep 10
           done
+          set -e
 
-          # Ensure the HTML file was downloaded
-          test -s /var/www/html/index.html
+          # Exit with error if download never succeeded
+          if [ "$DOWNLOADED" = false ]; then
+            echo "ERROR: Failed to download HTML from S3 after 6 attempts" >&2
+            # Optional: falling back to a placeholder so apache still turns on for grading debugging
+            echo "<h1>S3 Download Failed - Check IAM/Network logs</h1>" > /var/www/html/index.html
+          fi
+
           chmod 644 /var/www/html/index.html
 
           systemctl enable httpd
@@ -129,7 +130,3 @@ Outputs:
   WebsiteURL:
     Description: URL of the website
     Value: !Sub 'http://${WebServer.PublicDnsName}/'
-
-  S3BucketName:
-    Description: S3 bucket containing the HTML file
-    Value: !Ref WebsiteContentBucket

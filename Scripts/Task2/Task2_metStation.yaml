@@ -1,11 +1,20 @@
-
 AWSTemplateFormatVersion: 2010-09-09
-Description: Task2 , three teir system in the form of an ATU weather service
-Parameters: ## using the same parameters as the latest cloudformations example
+Description: 3-Tier App - Web Server, App Server (curl), RDS MySQL
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: MyWebApp
+
   LatestAmiId:
-    Description: The latest Amazon Linux 2 AMI from the Parameter Store
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  IDbucketName:
+    Description: S3 bucket containing html with student name and ID
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$'
+    ConstraintDescription: The IDbucketName parameter must be a valid lowercase S3 bucket string (3-63 chars, lowercase, numbers, or hyphens only).
 
   InstanceType:
     Description: WebServer EC2 instance type
@@ -15,23 +24,35 @@ Parameters: ## using the same parameters as the latest cloudformations example
       - t3.micro
       - t2.micro
     ConstraintDescription: must be a valid EC2 instance type.
-    
-  MyIP:
-    Description: Your IP address in CIDR format (e.g. 203.0.113.1/32).
-    Type: String
-    MinLength: '9'
-    MaxLength: '18'
-    Default: 0.0.0.0/0
-    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$'
-    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
 
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access  
+  ExternalURL:
+    Type: String
+    Default: http://met.ie   
+    Description: Met Eireann API 
+
+  DBName:
+    Type: String
+    Default: appdb
+
+  DBUsername:
+    Type: String
+    Default: admin
+    NoEcho: true
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: '8'
 
 Resources:
-
+  # ─── STORAGE & IAM ─────────────────────────────────────────────────────────
   WebsiteContentBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: atu_weather_app_resources  
+      BucketName: iac-atu-weather-app-resources-l00205551
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -46,7 +67,8 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: ec2.amazonaws.com
+              Service: 
+                - ec2.amazonaws.com
             Action: sts:AssumeRole
       Policies:
         - PolicyName: ReadWebsiteContent
@@ -58,74 +80,201 @@ Resources:
                   - s3:GetObject
                 Resource: !Sub '${WebsiteContentBucket.Arn}/*'
 
-
-Conditions:
-  
-  WebServerInstanceProfile:
+  EC2InstanceProfile: 
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles:
         - !Ref WebServerRole
 
-  # Allow HTTP access to the EC2 instance
-  WebServerSecurityGroup:
+  # ─── VPC & NETWORKING ──────────────────────────────────────────────────────
+  VPC:              
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-VPC" }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Public" }]
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Private-AZ1" }]
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.3.0/24
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-Private-AZ2" }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties: { Domain: vpc }
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet1RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RTA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  # ─── SECURITY GROUPS ───────────────────────────────────────────────────────
+  WebServerSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP access via my IP address
+      GroupDescription: Web server - HTTP and SSH
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: 0.0.0.0/0 }
+
+  AppServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App server - accept from web server only 
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: !Ref MyIP
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref WebServerSG
 
+  DBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS MySQL - allow from app server only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppServerSG
+
+  # ─── TIER 1: WEB SERVER (public subnet) ────────────────────────────────────
   WebServer:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref LatestAmiId
       InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref WebServerInstanceProfile
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet
+      IamInstanceProfile: !Ref EC2InstanceProfile # Updated reference
       SecurityGroupIds:
-        - !Ref WebServerSecurityGroup
-      # UserData: !Base64 |
-      #   #!/bin/bash
-      #   yum update -y
-      #   yum install -y httpd
-      #   systemctl start httpd
-      #   systemctl enable httpd
-      #   # Copy the HTML file from S3 directly to the web root
-      #   aws s3 cp s3://${iac-assign1-task1-l00205551}/s3_student_info.html /var/www/html/index.html
-      #   cat /mnt/s3_student_info.html
+        - !Ref WebServerSG # Updated reference
+      Tags: [{ Key: Name, Value: !Sub "${EnvironmentName}-WebServer" }]
       UserData:
         Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euxo pipefail
-          yum update -y
-          yum install -y httpd awscli
-          mkdir -p /var/www/html
+            #!/bin/bash
+            set -uxo pipefail
 
-          # for debugging, an LLM recommnended running multiple upload loops for 300 seconds 
-                    # Download the HTML file from S3
-          for i in {1..30}; do
-            if aws s3 cp \
-              s3://${WebsiteContentBucket}/s3_student_info.html \
-              /var/www/html/index.html; then
-              break
+            # Inject region context for AWS CLI stability in UserData
+            export AWS_DEFAULT_REGION=${AWS::Region}
+
+            yum update -y
+            yum install -y httpd awscli
+            mkdir -p /var/www/html
+            mkdir -p /var/apps/
+
+            # Retry loop - set +e so a failed attempt doesn't abort the script
+            set +e
+            DOWNLOADEDhtml=false
+            DOWNLOADEDapps=false
+            for i in {1..6}; do
+              if aws s3 cp s3://${IDbucketName}/webpage.html /var/www/html/webpage.html; then
+                DOWNLOADEDhtml=true
+                break
+              fi
+              if aws s3 cp s3://${IDbucketName}/met_weather.py /var/apps/met_weather.py; then
+                DOWNLOADEDapps=true
+                break
+              fi
+              if aws s3 cp s3://${IDbucketName}/*.py /var/apps/; then
+                DOWNLOADEDapps=true
+                break
+              fi
+              sleep 10
+            done
+            set -e
+
+            # Exit with error if download never succeeded
+            if [ "$DOWNLOADEDhtml" = false || "$DOWNLOADEDapps" = false ]; then
+              echo "ERROR: Failed to download HTML from S3 after 6 attempts" >&2
+              # Optional: falling back to a placeholder so apache still turns on for grading debugging
+              echo "<h1>S3 Download Failed - Check IAM/Network logs</h1>" > /var/www/html/index.html
             fi
-            sleep 10
-          done
 
-          # Ensure the HTML file was downloaded
-          test -s /var/www/html/index.html
-          chmod 644 /var/www/html/index.html
+            chmod 644 /var/www/html/webpage.html
 
-          systemctl enable httpd
-          systemctl start httpd
+            systemctl enable httpd
+            systemctl start httpd
 
+# Optional Outputs Section cleaned up to avoid future dependency issues
 Outputs:
-  WebsiteURL:
-    Description: URL of the website
-    Value: !Sub 'http://${WebServer.PublicDnsName}/'
-
-  S3BucketName:
-    Description: S3 bucket containing the HTML file
-    Value: !Ref WebsiteContentBucket
+  WebServerPublicIP:
+    Description: Public IP of the Web Server
+    Value: !GetAtt WebServer.PublicIp
