@@ -18,24 +18,53 @@ LAT = "54.9526"
 LONG = "-7.7211"
 API_URL = f"http://openaccess.pf.api.met.ie/metno-wdb2ts/locationforecast?lat={LAT};long={LONG}"
 
-WORK_DIR = "./opt/weather-app"
+WORK_DIR = "/opt/"#"./opt/weather-app"
 XML_FILE = os.path.join(WORK_DIR, "forecast.xml")
 
 def local_name(tag):
     return tag.rsplit("}", 1)[-1]
 
+def init_database():
+    """Establishes initial connection and ensures the schema layout exists."""
+    try:
+        conn = pymysql.connect(
+            host=os.environ.get("DB_HOST"),#, "127.0.0.1"),
+            user=os.environ.get("DB_USER"),# "root"),
+            password=os.environ.get("DB_PASSWORD"),# "my_secret_password"),
+            database=os.environ.get("DB_NAME"),# "my_local_db"),
+            connect_timeout=10,
+            autocommit=True  # DDL statements auto-commit natively
+        )
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS weather_observations (
+                    forecast_time DATETIME,
+                    location_lat VARCHAR(20),
+                    location_lon VARCHAR(20),
+                    temperature_c DECIMAL(5,2) NULL,
+                    condition_id VARCHAR(50) NULL,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (forecast_time, location_lat, location_lon)
+                );
+            """)
+        conn.close()
+        logging.info("Database schema verification successful.")
+    except Exception as e:
+        logging.error(f"Database initialization critical failure: {e}")
+        sys.exit(1)
+
 def main():
-    logging.info("Fetching Met Éireann forecast...")
+    # 1. Guarantee table exists BEFORE entering the download loop
+    init_database()
     
     while True:
+        logging.info("Fetching Met Éireann forecast...")
         try:
-            # Replicates curl --fail --connect-timeout 10
             req = urllib.request.Request(API_URL, headers={"User-Agent": "WeatherApp/1.0"})
             with urllib.request.urlopen(req, timeout=10) as response:
                 if response.status != 200:
                     raise RuntimeError(f"HTTP error: {response.status}")
                 
-                # Ensure work directory exists and save file
                 os.makedirs(WORK_DIR, exist_ok=True)
                 with open(XML_FILE, "wb") as f:
                     f.write(response.read())
@@ -70,12 +99,15 @@ def main():
             temperature = None
             condition = None
 
-            for node in location.iter():
+            for node in location:
                 name = local_name(node.tag)
                 if name == "temperature":
                     temperature = node.attrib.get("value")
                 elif name == "symbol":
                     condition = node.attrib.get("id")
+
+            if temperature is None and condition is None:
+                continue
 
             try:
                 dt = datetime.fromisoformat(forecast_time.replace("Z", "+00:00"))
@@ -87,7 +119,7 @@ def main():
             records.append((
                 dt,
                 temperature if temperature not in (None, "") else None,
-                condition,
+                condition if condition not in (None, "") else None,
                 LAT,
                 LONG
             ))
@@ -99,41 +131,42 @@ def main():
         # 3. Database Insertion
         try:
             conn = pymysql.connect(
-                host=os.environ["DB_HOST"],
-                user=os.environ["DB_USER"],
-                password=os.environ["DB_PASSWORD"],
-                database=os.environ["DB_NAME"],
+                host=os.environ.get("DB_HOST", "127.0.0.1"),
+                user=os.environ.get("DB_USER", "root"),
+                password=os.environ.get("DB_PASSWORD", "my_secret_password"),
+                database=os.environ.get("DB_NAME", "my_local_db"),
                 connect_timeout=10,
                 autocommit=False
             )
-        except KeyError as e:
-            logging.error(f"Missing required database environment variable: {e}")
-            sys.exit(1)
         except Exception as e:
-            logging.error(f"Database connection failed: {e}")
+            logging.error(f"Database connection failed during runtime execution: {e}")
             sys.exit(1)
 
         try:
             with conn.cursor() as cur:
                 cur.executemany("""
                     INSERT INTO weather_observations
-                    (forecast_time, temperature_c, condition_id,
-                    location_lat, location_lon)
+                    (forecast_time, temperature_c, condition_id, location_lat, location_lon)
                     VALUES (%s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
-                    temperature_c = VALUES(temperature_c),
-                    condition_id = VALUES(condition_id),
+                    temperature_c = COALESCE(VALUES(temperature_c), weather_observations.temperature_c),
+                    condition_id = COALESCE(VALUES(condition_id), weather_observations.condition_id),
                     fetched_at = CURRENT_TIMESTAMP
                 """, records)
 
             conn.commit()
-            logging.info(f"Processed {len(records)} forecast records successfully")
+            logging.info(f"Successfully processed and merged {len(records)} forecast records.")
         except Exception as e:
             conn.rollback()
             logging.error(f"Database transaction failed: {e}")
             sys.exit(1)
         finally:
             conn.close()
-        time.sleep(60) # wait a minute.
+            
+        logging.info("Sleeping for 60 seconds...")
+        time.sleep(60)
+
 if __name__ == "__main__":
     main()
+
+

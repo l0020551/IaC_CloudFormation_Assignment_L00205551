@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Stack: Deploying an RDS PostgreSQL Database inside an Existing VPC for direct console debugging.'
+
+Parameters:
+  ExistingVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'Select your existing active VPC ID'
+
+  ExistingSubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Select the first public subnet ID inside that VPC'
+
+  ExistingSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Select a second public subnet ID inside that VPC (Must be a different Availability Zone)'
+
+  DBUsername:
+    Type: String
+    Default: dbadmin
+    Description: 'The database admin master username'
+    
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: 'The database admin master password (Minimum 8 characters)'
+    MinLength: 8
+
+  YourIPAddress:
+    Type: String
+    Description: 'Your local public IP address to allow firewall access (Format: x.x.x.x/32)'
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/32$'
+
+Resources:
+  # 1. Links your existing subnets into an RDS-usable group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Existing subnets used for debugging'
+      SubnetIds:
+        - !Ref ExistingSubnetA
+        - !Ref ExistingSubnetB
+
+  # 2. Creates a specific firewall rule attached to your existing VPC
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Allow SQL Console inbound traffic from Developer IP'
+      VpcId: !Ref ExistingVpcId
+      SecurityGroupInboundRules:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref YourIPAddress
+
+  # 3. The PostgreSQL Instance leveraging the existing infrastructure
+  DebugDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: debug-existing-vpc-db
+      Engine: postgres
+      EngineVersion: '15'
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: '20'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      PubliclyAccessible: true  # Instructs AWS to assign a routeable public IP
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DBSecurityGroup.GroupId
+      DeletionProtection: false
+
+Outputs:
+  DatabaseConnectionString:
+    Description: 'The connection endpoint host for your SQL Console application'
+    Value: !GetAtt DebugDatabase.Endpoint.Address

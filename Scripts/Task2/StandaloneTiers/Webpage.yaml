@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Deploys a Flask Weather Dashboard App on EC2 pulling the script from an existing S3 bucket, behind CloudFront.'
+
+Parameters:
+  ExistingVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'ID of your existing VPC'
+
+  ExistingSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'ID of an existing public subnet inside that VPC'
+
+  S3BucketName:
+    Type: String
+    Description: 'The name of the existing S3 bucket containing your python script (e.g., my-weather-bucket)'
+
+  PythonScriptName:
+    Type: String
+    Default: 'app.py'
+    Description: 'The name of the python file inside the bucket (e.g., app.py or dashboard.py)'
+
+  DBHost:
+    Type: String
+    Description: 'The endpoint/hostname of your existing MySQL database'
+
+  DBUser:
+    Type: String
+    Default: dbadmin
+    Description: 'The database user name'
+
+  DBName:
+    Type: String
+    Default: weather_db
+    Description: 'The name of the database'
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: 'The password for your database user'
+
+Resources:
+  # 1. IAM Role allowing EC2 to read from your specific S3 Bucket
+  EC2S3ReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ://amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: S3BucketReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+
+  # 2. Instance Profile linking the IAM role to the EC2 Instance
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2S3ReadRole
+
+  # 3. Security Group for the Web App Server
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Allow HTTP traffic to the Flask application'
+      VpcId: !Ref ExistingVpcId
+      SecurityGroupInboundRules:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # 4. EC2 Instance to Host the Server
+  WeatherAppServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+      SubnetId: !Ref ExistingSubnetId
+      SecurityGroupIds:
+        - !GetAtt WebServerSecurityGroup.GroupId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # 1. Update system and install Python + system dependencies
+          dnf update -y
+          dnf install -y python3-pip python3-devel gcc
+
+          # 2. Install Flask and PyMySQL dependencies
+          pip3 install flask pymysql
+
+          # 3. Create the app directory and download the script from S3
+          mkdir -p /opt/weather-app
+          
+          # Dynamically pull the file from your existing S3 Bucket
+          aws s3 cp s3://${S3BucketName}/${PythonScriptName} /opt/weather-app/app.py
+
+          # 4. Ensure the script binds to 0.0.0.0 so CloudFront can talk to it
+          # This replaces 127.0.0.1 with 0.0.0.0 if it exists in your script
+          sed -i "s/'127.0.0.1'/'0.0.0.0'/g" /opt/weather-app/app.py
+          sed -i 's/"127.0.0.1"/"0.0.0.0"/g' /opt/weather-app/app.py
+
+          # 5. Export configuration environment variables injected securely by CloudFormation
+          export DB_HOST="${DBHost}"
+          export DB_USER="${DBUser}"
+          export DB_PASSWORD="${DBPassword}"
+          export DB_NAME="${DBName}"
+
+          # 6. Execute Flask application system service in background
+          nohup python3 /opt/weather-app/app.py > /var/log/weather-app.log 2>&1 &
+
+  # 5. CloudFront Distribution Layer
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        Comment: 'Public Global CDN Cache layer for Weather App'
+        Origins:
+          - Id: CustomEC2Origin
+            DomainName: !GetAtt WeatherAppServer.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: CustomEC2Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+
+Outputs:
+  PublicWebpageUrl:
+    Description: 'The public URL provided by CloudFront to view your Live Weather Logs'
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'

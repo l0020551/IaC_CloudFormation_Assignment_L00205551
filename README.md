@@ -137,3 +137,38 @@ After spending hours debugging, the task has been broken down into to stages,
  * Get python script running in EC2
  * push updates to webpage
  * push changes to database. 
+ ---
+
+ **Date:** October 26th, 2026
+
+ After pushing changes yesterday, the task2 app was run locally, an SQL container, a python flask API webpage and a script to get and push data from met eireann to a database. Having it run locally with success, the next stage is to migrate it to the stack.
+ 
+ Today's plan:
+ * load html of task 2 using task 1 as a reference
+ * integrate database
+ * add ec2 to poll met eireann and push to dbc.
+
+ After multiple failed attempts, a more finite approach has been decided, a new folder called [StandaloneTiers](./Scripts/Task2/StandaloneTiers/) has been created. Each Teir will be worked on until all  three are configured and operating as desired. Once all three independent scripts are running, then will be integrated into a singular stack. 
+
+ First, a VPC was manually created for the application using the following steps from amazonQ 
+[pic1](./screenshots/Screenshot%20From%202026-10-26%2016-10-54.png)
+[pic2](./screenshots/Screenshot%20From%202026-10-26%2016-11-11.png)
+[pic3](./screenshots/Screenshot%20From%202026-10-26%2016-11-24.png)
+
+On generating the VPC, the manual scripts were run in the following order:
+1. Database (the application layer and web layer are dependent on this)
+2. Application layer (populate  the DBC with data)
+3. Web layer.
+
+* The database standalone script runs.
+* After some debugging in the EC2 terminal the App standalone runs. the database needed to be decoupled and the met readings stored locally on the EC2 instance as an xml. [terminal debug](./screenshots/ec2_debug.png)
+
+### Next Steps
+
+* App and RDS standalones working in sync.
+* Web standalone working
+* All three working in sync
+* Script merge. 
+
+
+--- 
