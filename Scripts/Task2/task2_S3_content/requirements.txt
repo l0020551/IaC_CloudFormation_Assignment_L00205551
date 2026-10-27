@@ -1,7 +1,2 @@
-flask 
-pymysql
-logging
-time
-urllib
-xml
-datetime 
+flask==2.2.5
+pymysql==1.1.1
