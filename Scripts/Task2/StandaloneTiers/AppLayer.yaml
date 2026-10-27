@@ -1,0 +1,199 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IaC assignment 1 task 1 2026
+
+Parameters:
+  LatestAmiId:
+    Description: Latest Amazon Linux 2 AMI from Parameter Store
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t3.micro
+      - t2.micro
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+  IDbucketName:
+    Description: Existing S3 bucket containing the application files
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be a valid lowercase S3 bucket name.
+
+  ExistingVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select your existing VPC ID
+
+  ExistingSubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select the first public subnet ID
+
+  ExistingSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select a second subnet in a different Availability Zone
+
+  YourIPAddress:
+    Type: String
+    Description: Your public IP address in CIDR notation, e.g. 203.0.113.10/32
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Enter an IPv4 CIDR range, preferably your IP with /32.
+
+Resources:
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for database deployment
+      SubnetIds:
+        - !Ref ExistingSubnetA
+        - !Ref ExistingSubnetB
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow PostgreSQL traffic from the developer IP
+      VpcId: !Ref ExistingVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref YourIPAddress
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP traffic to the web server
+      VpcId: !Ref ExistingVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadWebsiteContent
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${IDbucketName}'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${IDbucketName}/*'
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WebServerRole
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+      SubnetId: !Ref ExistingSubnetA
+      SecurityGroupIds:
+        - !Ref WebServerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: IaC-Assignment-WebServer
+      
+      UserData:
+       
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -Eeuxo pipefail
+
+          exec > >(tee -a /var/log/user-data.log) 2>&1
+          trap 'rc=$?; echo "ERROR: line $LINENO, exit code $rc"' ERR
+
+          export AWS_DEFAULT_REGION=${AWS::Region}
+
+          echo "=== User data started: $(date -Is) ==="
+          cat /etc/os-release
+
+          yum update -y
+          yum install -y httpd awscli python3 python3-pip
+
+          mkdir -p /var/app/opt
+
+          touch /var/app/opt/forecast.xml
+          chmod 664 /var/app/opt/forecast.xml
+
+          DOWNLOADED=false
+
+          for i in {1..6}; do
+            if aws s3 cp "s3://${IDbucketName}/StandaloneApp.py" \
+                /var/app/StandaloneApp.py &&
+              aws s3 cp "s3://${IDbucketName}/requirements.txt" \
+                /var/app/requirements.txt; then
+              DOWNLOADED=true
+              break
+            fi
+
+            echo "S3 download attempt $i failed; retrying..."
+            sleep 10
+          done
+
+          if [ "$DOWNLOADED" != true ]; then
+            echo "ERROR: Failed to download application files from S3."
+            exit 1
+          fi
+
+          chmod 644 /var/app/StandaloneApp.py /var/app/requirements.txt
+
+          # Isolate application dependencies
+          python3 -m venv /var/app/venv
+          /var/app/venv/bin/python -m pip install \
+            -r /var/app/requirements.txt
+
+          chown -R ec2-user:ec2-user /var/app/opt
+
+          # Run the app as a managed service
+          cat > /etc/systemd/system/standalone-app.service <<'SERVICE'
+          [Unit]
+          Description=Standalone Forecast Application
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/var/app
+          ExecStart=/var/app/venv/bin/python -u /var/app/StandaloneApp.py
+          Restart=on-failure
+          RestartSec=5
+          StandardOutput=append:/var/log/standalone-app.log
+          StandardError=append:/var/log/standalone-app.log
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl daemon-reload
+          systemctl enable --now standalone-app.service
+
+          systemctl enable --now httpd
+
+          echo "=== User data completed: $(date -Is) ==="

@@ -1,0 +1,495 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Weather forecast collector on EC2 with private RDS MySQL,
+  Secrets Manager credentials, IAM and automatic service startup.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: EC2 instance size.
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+    Description: RDS MySQL instance size.
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+    Description: RDS storage in GiB.
+
+Resources:
+
+  # --------------------------------------------------
+  # Networking
+  # --------------------------------------------------
+
+  WeatherVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: weather-vpc
+
+  WeatherInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  WeatherIGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref WeatherVPC
+      InternetGatewayId: !Ref WeatherInternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WeatherVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref WeatherVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+
+  WeatherRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WeatherVPC
+
+  WeatherDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: WeatherIGWAttachment
+    Properties:
+      RouteTableId: !Ref WeatherRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref WeatherInternetGateway
+
+  SubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref WeatherRouteTable
+
+  SubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref WeatherRouteTable
+
+  # --------------------------------------------------
+  # Security groups
+  # --------------------------------------------------
+
+  WeatherEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Outbound access for the weather collector
+      VpcId: !Ref WeatherVPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+
+  WeatherDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MySQL access only from the weather EC2 instance
+      VpcId: !Ref WeatherVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !GetAtt WeatherEC2SecurityGroup.GroupId
+
+  # --------------------------------------------------
+  # Database credentials and RDS
+  # --------------------------------------------------
+
+  WeatherDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Credentials for the weather MySQL database
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"weatheradmin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  WeatherDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for the weather database
+      SubnetIds:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  WeatherDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mysql
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: weatherdb
+      MasterUsername: !Sub '{{resolve:secretsmanager:${WeatherDBSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${WeatherDBSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref WeatherDBSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt WeatherDBSecurityGroup.GroupId
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 1
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false
+      Tags:
+        - Key: Name
+          Value: weather-database
+
+  # --------------------------------------------------
+  # EC2 permissions
+  # --------------------------------------------------
+
+  WeatherEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadWeatherDatabaseSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref WeatherDBSecret
+
+  WeatherInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WeatherEC2Role
+
+  # --------------------------------------------------
+  # EC2 application server
+  # --------------------------------------------------
+
+  WeatherEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - WeatherDatabase
+      - WeatherDefaultRoute
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref WeatherInstanceProfile
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds:
+        - !GetAtt WeatherEC2SecurityGroup.GroupId
+      MetadataOptions:
+        HttpTokens: required
+      Tags:
+        - Key: Name
+          Value: weather-collector
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          dnf update -y
+          dnf install -y python3 python3-pip
+
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pymysql boto3
+
+          mkdir -p /opt/weather-app
+          chmod 750 /opt/weather-app
+
+          cat > /opt/weather-app/weather_collector.py <<'PYTHON'
+          #!/usr/bin/env python3
+          import os
+          import sys
+          import json
+          import time
+          import logging
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          import boto3
+          import pymysql
+          from botocore.exceptions import BotoCoreError, ClientError
+
+          logging.basicConfig(
+              level=logging.INFO,
+              format="%(asctime)s [%(levelname)s] %(message)s"
+          )
+
+          LAT = "54.9526"
+          LONG = "-7.7211"
+          API_URL = (
+              "http://openaccess.pf.api.met.ie/"
+              "metno-wdb2ts/locationforecast"
+              f"?lat={LAT};long={LONG}"
+          )
+          WORK_DIR = "/opt/weather-app"
+          XML_FILE = os.path.join(WORK_DIR, "forecast.xml")
+
+          DB_HOST = os.environ["DB_HOST"]
+          DB_NAME = os.environ.get("DB_NAME", "weatherdb")
+          SECRET_ARN = os.environ["DB_SECRET_ARN"]
+          AWS_REGION = os.environ["AWS_REGION"]
+
+          def get_db_credentials():
+              client = boto3.client(
+                  "secretsmanager", region_name=AWS_REGION
+              )
+              response = client.get_secret_value(SecretId=SECRET_ARN)
+              secret = json.loads(response["SecretString"])
+              return secret["username"], secret["password"]
+
+          def connect_db():
+              username, password = get_db_credentials()
+              return pymysql.connect(
+                  host=DB_HOST,
+                  user=username,
+                  password=password,
+                  database=DB_NAME,
+                  connect_timeout=10,
+                  autocommit=False,
+                  charset="utf8mb4"
+              )
+
+          def local_name(tag):
+              return tag.rsplit("}", 1)[-1]
+
+          def init_database():
+              conn = connect_db()
+              try:
+                  with conn.cursor() as cur:
+                      cur.execute("""
+                          CREATE TABLE IF NOT EXISTS weather_observations (
+                              forecast_time DATETIME NOT NULL,
+                              location_lat VARCHAR(20) NOT NULL,
+                              location_lon VARCHAR(20) NOT NULL,
+                              temperature_c DECIMAL(5,2) NULL,
+                              condition_id VARCHAR(50) NULL,
+                              fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                                  ON UPDATE CURRENT_TIMESTAMP,
+                              PRIMARY KEY (
+                                  forecast_time, location_lat, location_lon
+                              )
+                          )
+                      """)
+                  conn.commit()
+                  logging.info("Database schema verified.")
+              finally:
+                  conn.close()
+
+          def fetch_records():
+              req = urllib.request.Request(
+                  API_URL, headers={"User-Agent": "WeatherApp/1.0"}
+              )
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  if response.status != 200:
+                      raise RuntimeError(
+                          f"Forecast API returned HTTP {response.status}"
+                      )
+                  xml_data = response.read()
+
+              with open(XML_FILE, "wb") as file:
+                  file.write(xml_data)
+
+              root = ET.fromstring(xml_data)
+              records = []
+
+              for time_node in root.iter():
+                  if local_name(time_node.tag) != "time":
+                      continue
+
+                  forecast_time = time_node.attrib.get("from")
+                  if not forecast_time:
+                      continue
+
+                  location = next(
+                      (node for node in time_node
+                       if local_name(node.tag) == "location"),
+                      None
+                  )
+                  if location is None:
+                      continue
+
+                  temperature = None
+                  condition = None
+
+                  for node in location:
+                      name = local_name(node.tag)
+                      if name == "temperature":
+                          temperature = node.attrib.get("value")
+                      elif name == "symbol":
+                          condition = node.attrib.get("id")
+
+                  if temperature is None and condition is None:
+                      continue
+
+                  try:
+                      dt = datetime.fromisoformat(
+                          forecast_time.replace("Z", "+00:00")
+                      )
+                      if dt.tzinfo is not None:
+                          dt = dt.astimezone(timezone.utc).replace(
+                              tzinfo=None
+                          )
+                  except ValueError:
+                      continue
+
+                  records.append((
+                      dt,
+                      LAT,
+                      LONG,
+                      temperature or None,
+                      condition or None
+                  ))
+
+              if not records:
+                  raise RuntimeError("No forecast records found in XML")
+
+              return records
+
+          def save_records(records):
+              conn = connect_db()
+              try:
+                  with conn.cursor() as cur:
+                      cur.executemany("""
+                          INSERT INTO weather_observations
+                          (forecast_time, location_lat, location_lon,
+                           temperature_c, condition_id)
+                          VALUES (%s, %s, %s, %s, %s)
+                          ON DUPLICATE KEY UPDATE
+                            temperature_c = COALESCE(
+                              VALUES(temperature_c),
+                              weather_observations.temperature_c
+                            ),
+                            condition_id = COALESCE(
+                              VALUES(condition_id),
+                              weather_observations.condition_id
+                            ),
+                            fetched_at = CURRENT_TIMESTAMP
+                      """, records)
+                  conn.commit()
+                  logging.info(
+                      "Processed %s forecast records.", len(records)
+                  )
+              except Exception:
+                  conn.rollback()
+                  raise
+              finally:
+                  conn.close()
+
+          def main():
+              os.makedirs(WORK_DIR, exist_ok=True)
+
+              while True:
+                  try:
+                      init_database()
+                      records = fetch_records()
+                      save_records(records)
+                      delay = 60
+                  except (
+                      Exception
+                  ) as exc:
+                      logging.exception("Collection cycle failed: %s", exc)
+                      delay = 60
+
+                  logging.info("Next attempt in %s seconds.", delay)
+                  time.sleep(delay)
+
+          if __name__ == "__main__":
+              main()
+          PYTHON
+
+          chmod 750 /opt/weather-app/weather_collector.py
+
+          cat > /etc/weather-app.env <<'ENV'
+          DB_HOST=${WeatherDatabase.Endpoint.Address}
+          DB_NAME=weatherdb
+          DB_SECRET_ARN=${WeatherDBSecret}
+          AWS_REGION=${AWS::Region}
+          ENV
+          chmod 600 /etc/weather-app.env
+          chown root:root /etc/weather-app.env
+
+          cat > /etc/systemd/system/weather-collector.service <<'UNIT'
+          [Unit]
+          Description=Weather Forecast Collector
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=root
+          EnvironmentFile=/etc/weather-app.env
+          ExecStart=/usr/bin/python3 /opt/weather-app/weather_collector.py
+          Restart=always
+          RestartSec=15
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable --now weather-collector.service
+
+Outputs:
+  EC2InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref WeatherEC2Instance
+
+  DatabaseEndpoint:
+    Description: Private RDS endpoint hostname
+    Value: !GetAtt WeatherDatabase.Endpoint.Address
+
+  DatabasePort:
+    Description: MySQL port
+    Value: !GetAtt WeatherDatabase.Endpoint.Port
+
+  DatabaseName:
+    Description: Database name
+    Value: weatherdb
+
+  DatabaseSecretArn:
+    Description: Secrets Manager ARN containing database credentials
+    Value: !Ref WeatherDBSecret
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref WeatherVPC
