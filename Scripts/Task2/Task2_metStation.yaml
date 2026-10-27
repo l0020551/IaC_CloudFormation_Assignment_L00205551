@@ -16,8 +16,8 @@ Parameters:
     AllowedPattern: '^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$'
     ConstraintDescription: The IDbucketName parameter must be a valid lowercase S3 bucket string (3-63 chars, lowercase, numbers, or hyphens only).
 
-  InstanceType:
-    Description: WebServer EC2 instance type
+  AppInstanceType:
+    Description:  EC2 instance type for app layer
     Type: String
     Default: t3.micro
     AllowedValues:
@@ -222,7 +222,7 @@ Resources:
       - WeatherDefaultRoute
     Properties:
       ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
-      InstanceType: !Ref InstanceType
+      InstanceType: !Ref AppInstanceType
       IamInstanceProfile: !Ref WeatherInstanceProfile
       SubnetId: !Ref PublicSubnetA
       SecurityGroupIds:
@@ -276,10 +276,10 @@ Resources:
           WORK_DIR = "/opt/weather-app"
           XML_FILE = os.path.join(WORK_DIR, "forecast.xml")
 
-          DB_HOST = os.environ["DB_HOST"]
-          DB_NAME = os.environ.get("DB_NAME", "weatherdb")
-          SECRET_ARN = os.environ["DB_SECRET_ARN"]
-          AWS_REGION = os.environ["AWS_REGION"]
+          export DB_HOST = os.environ["DB_HOST"]
+          export DB_NAME = os.environ.get("DB_NAME", "weatherdb")
+          export SECRET_ARN = os.environ["DB_SECRET_ARN"]
+          export AWS_REGION = os.environ["AWS_REGION"]
 
           def get_db_credentials():
               client = boto3.client(

@@ -172,3 +172,28 @@ On generating the VPC, the manual scripts were run in the following order:
 
 
 --- 
+
+**Date:** October 27th, 2026 
+
+* App ec2 stanalone has been debugged.
+* next step is RDS communication integration
+For this AmazonQ was questioned: [aws ec2 to RDS comms](./screenshots/ec2_rds_connection.png)
+
+At this stage, after manually provisioning a VPC and debugging communication between the RDS and EC2 Instance, I am starting to understand how cloudformation stacks work. 
+
+* At this stage I have a standalone RDS stack, a standalone app and the two integrated.
+I have tidied the [App2Db.yaml](./Scripts/Task2/StandaloneTiers/App2Db.yaml) script. 
+The next steps will be to generate the overall stack for task2. 
+I think I will split this into two solutions:
+1. One stack that does everything; VPC and RDS generation etc. 
+2. Multi-stack solution; For real-world Ops I would partition the Database and VPC into there own stack as they are less ephemeral that the EC2 App and Web tiers. Rather than generate a new Database and VPC each stack call, existing istances can be called in paramters. 
+
+### Next steps
+
+1. test App2Db.yaml
+2. Intergrate stanalone webpage stack
+3. generate a standalone VPC stack
+4. Generate an "All in one" stack
+5. Tidy and streamline final task 2 solution.
+
+---

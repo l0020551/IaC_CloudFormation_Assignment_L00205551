@@ -13,6 +13,10 @@ Parameters:
   ExistingSubnetB:
     Type: AWS::EC2::Subnet::Id
     Description: 'Select a second public subnet ID inside that VPC (Must be a different Availability Zone)'
+  
+  DBExistingSG:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: 'Select SecurityGroup for database'
 
   DBUsername:
     Type: String
@@ -66,7 +70,7 @@ Resources:
       PubliclyAccessible: true  # Instructs AWS to assign a routeable public IP
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups:
-        - !GetAtt DBSecurityGroup.GroupId
+        - !Ref DBExistingSG #GetAtt DBSecurityGroup.GroupId
       DeletionProtection: false
 
 Outputs:

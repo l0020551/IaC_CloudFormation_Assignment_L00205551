@@ -8,7 +8,7 @@ import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-import pymysql
+import psycopg2
 
 # Setup basic logging to replicate the echo commands
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -18,35 +18,42 @@ LAT = "54.9526"
 LONG = "-7.7211"
 API_URL = f"http://openaccess.pf.api.met.ie/metno-wdb2ts/locationforecast?lat={LAT};long={LONG}"
 
-WORK_DIR = "/opt/"#"./opt/weather-app"
+WORK_DIR = "/var/app/opt/"
 XML_FILE = os.path.join(WORK_DIR, "forecast.xml")
 
 def local_name(tag):
     return tag.rsplit("}", 1)[-1]
 
+def get_pg_connection():
+    """Helper to generate a unified PostgreSQL connection configuration."""
+    return psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.environ.get("DB_PORT", "5432")),
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        dbname=os.environ.get("DB_NAME", "postgres"),
+        connect_timeout=10,
+        sslmode=os.environ.get("DB_SSLMODE", "require"),
+    )
+
 def init_database():
-    """Establishes initial connection and ensures the schema layout exists."""
+    """Establishes initial connection and ensures the schema layout exists in PostgreSQL."""
     try:
-        conn = pymysql.connect(
-            host=os.environ.get("DB_HOST"),#, "127.0.0.1"),
-            user=os.environ.get("DB_USER"),# "root"),
-            password=os.environ.get("DB_PASSWORD"),# "my_secret_password"),
-            database=os.environ.get("DB_NAME"),# "my_local_db"),
-            connect_timeout=10,
-            autocommit=True  # DDL statements auto-commit natively
-        )
+        conn = get_pg_connection()
         with conn.cursor() as cur:
+            # Converted columns and schema syntax from MySQL to PostgreSQL layout
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS weather_observations (
-                    forecast_time DATETIME,
+                    forecast_time TIMESTAMP,
                     location_lat VARCHAR(20),
                     location_lon VARCHAR(20),
                     temperature_c DECIMAL(5,2) NULL,
                     condition_id VARCHAR(50) NULL,
-                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (forecast_time, location_lat, location_lon)
                 );
             """)
+        conn.commit()
         conn.close()
         logging.info("Database schema verification successful.")
     except Exception as e:
@@ -130,14 +137,7 @@ def main():
 
         # 3. Database Insertion
         try:
-            conn = pymysql.connect(
-                host=os.environ.get("DB_HOST", "127.0.0.1"),
-                user=os.environ.get("DB_USER", "root"),
-                password=os.environ.get("DB_PASSWORD", "my_secret_password"),
-                database=os.environ.get("DB_NAME", "my_local_db"),
-                connect_timeout=10,
-                autocommit=False
-            )
+            conn = get_pg_connection()
         except Exception as e:
             logging.error(f"Database connection failed during runtime execution: {e}")
             sys.exit(1)
@@ -148,10 +148,17 @@ def main():
                     INSERT INTO weather_observations
                     (forecast_time, temperature_c, condition_id, location_lat, location_lon)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                    temperature_c = COALESCE(VALUES(temperature_c), weather_observations.temperature_c),
-                    condition_id = COALESCE(VALUES(condition_id), weather_observations.condition_id),
-                    fetched_at = CURRENT_TIMESTAMP
+                    ON CONFLICT (forecast_time, location_lat, location_lon)
+                    DO UPDATE SET
+                        temperature_c = COALESCE(
+                            EXCLUDED.temperature_c,
+                            weather_observations.temperature_c
+                        ),
+                        condition_id = COALESCE(
+                            EXCLUDED.condition_id,
+                            weather_observations.condition_id
+                        ),
+                        fetched_at = CURRENT_TIMESTAMP
                 """, records)
 
             conn.commit()
@@ -168,5 +175,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
