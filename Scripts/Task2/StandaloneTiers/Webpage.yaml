@@ -1,7 +1,12 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Deploys a Flask Weather Dashboard App on EC2 pulling the script from an existing S3 bucket, behind CloudFront.'
+Description: 'Deploys a Flask Weather Dashboard App on EC2 with an Nginx reverse proxy, behind CloudFront.'
 
 Parameters:
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: Latest Amazon Linux 2023 AMI
+
   ExistingVpcId:
     Type: AWS::EC2::VPC::Id
     Description: 'ID of your existing VPC'
@@ -33,6 +38,10 @@ Parameters:
     Default: weather_db
     Description: 'The name of the database'
 
+  WebPageSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: "Select a single security group for the Webpage EC2 instance."
+
   DBPassword:
     Type: String
     NoEcho: true
@@ -48,8 +57,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service:
-                - ://amazonaws.com
+              Service: ec2.amazonaws.com
             Action:
               - sts:AssumeRole
       Policies:
@@ -72,59 +80,64 @@ Resources:
       Roles:
         - !Ref EC2S3ReadRole
 
-  # 3. Security Group for the Web App Server
-  WebServerSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: 'Allow HTTP traffic to the Flask application'
-      VpcId: !Ref ExistingVpcId
-      SecurityGroupInboundRules:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-
-  # 4. EC2 Instance to Host the Server
+  # 3. EC2 Instance to Host the Server & Proxy
   WeatherAppServer:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: t3.micro
-      ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+      ImageId: !Ref LatestAmiId
       SubnetId: !Ref ExistingSubnetId
       SecurityGroupIds:
-        - !GetAtt WebServerSecurityGroup.GroupId
+        - !Ref WebPageSecurityGroupId
       IamInstanceProfile: !Ref EC2InstanceProfile
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # 1. Update system and install Python + system dependencies
+          # 1. Update system and install Python, GCC, and Nginx
           dnf update -y
-          dnf install -y python3-pip python3-devel gcc
+          dnf install -y python3-pip python3-devel gcc nginx
 
           # 2. Install Flask and PyMySQL dependencies
           pip3 install flask pymysql
 
           # 3. Create the app directory and download the script from S3
           mkdir -p /opt/weather-app
-          
-          # Dynamically pull the file from your existing S3 Bucket
           aws s3 cp s3://${S3BucketName}/${PythonScriptName} /opt/weather-app/app.py
 
-          # 4. Ensure the script binds to 0.0.0.0 so CloudFront can talk to it
-          # This replaces 127.0.0.1 with 0.0.0.0 if it exists in your script
-          sed -i "s/'127.0.0.1'/'0.0.0.0'/g" /opt/weather-app/app.py
-          sed -i 's/"127.0.0.1"/"0.0.0.0"/g' /opt/weather-app/app.py
+          # 4. Ensure the script binds to localhost (127.0.0.1) since Nginx handles public traffic
+          sed -i "s/'0.0.0.0'/'127.0.0.1'/g" /opt/weather-app/app.py
+          sed -i 's/"0.0.0.0"/"127.0.0.1"/g' /opt/weather-app/app.py
 
-          # 5. Export configuration environment variables injected securely by CloudFormation
+          # 5. Export configuration environment variables
           export DB_HOST="${DBHost}"
           export DB_USER="${DBUser}"
           export DB_PASSWORD="${DBPassword}"
           export DB_NAME="${DBName}"
 
-          # 6. Execute Flask application system service in background
+          # 6. Configure Nginx as a Reverse Proxy to Port 5000
+          cat << 'EOF' > /etc/nginx/conf.d/weather_app.conf
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          EOF
+
+          # 7. Start and enable Nginx service
+          systemctl start nginx
+          systemctl enable nginx
+
+          # 8. Execute Flask application in the background (Defaulting to port 5000)
           nohup python3 /opt/weather-app/app.py > /var/log/weather-app.log 2>&1 &
 
-  # 5. CloudFront Distribution Layer
+  # 4. CloudFront Distribution Layer
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -145,13 +158,17 @@ Resources:
             - GET
             - HEAD
             - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
           CachedMethods:
             - GET
             - HEAD
           ForwardedValues:
-            QueryString: false
+            QueryString: true
             Cookies:
-              Forward: none
+              Forward: all
           MinTTL: 0
           DefaultTTL: 0
           MaxTTL: 0

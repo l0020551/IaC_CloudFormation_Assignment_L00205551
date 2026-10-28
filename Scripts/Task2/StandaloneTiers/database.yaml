@@ -14,9 +14,9 @@ Parameters:
     Type: AWS::EC2::Subnet::Id
     Description: 'Select a second public subnet ID inside that VPC (Must be a different Availability Zone)'
   
-  DBExistingSG:
-    Type: List<AWS::EC2::SecurityGroup::Id>
-    Description: 'Select SecurityGroup for database'
+  DBExistingSGId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: 'Select a single active Security Group ID for the database'
 
   DBUsername:
     Type: String
@@ -44,13 +44,13 @@ Resources:
         - !Ref ExistingSubnetA
         - !Ref ExistingSubnetB
 
-  # 2. Creates a specific firewall rule attached to your existing VPC
+  # 2. Creates a specific isolated debugging firewall rule attached to your existing VPC
   DBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: 'Allow SQL Console inbound traffic from Developer IP'
       VpcId: !Ref ExistingVpcId
-      SecurityGroupInboundRules:
+      SecurityGroupIngress: # Fixed from SecurityGroupInboundRules
         - IpProtocol: tcp
           FromPort: 5432
           ToPort: 5432
@@ -70,7 +70,8 @@ Resources:
       PubliclyAccessible: true  # Instructs AWS to assign a routeable public IP
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups:
-        - !Ref DBExistingSG #GetAtt DBSecurityGroup.GroupId
+        - !Ref DBExistingSGId        # Your selected baseline security group
+        - !GetAtt DBSecurityGroup.GroupId  # The specific developer IP bypass group built above
       DeletionProtection: false
 
 Outputs:

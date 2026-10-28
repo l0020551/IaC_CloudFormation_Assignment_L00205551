@@ -197,3 +197,17 @@ I think I will split this into two solutions:
 5. Tidy and streamline final task 2 solution.
 
 ---
+
+**Date:** October 27th, 2026 
+
+Just did an hour of work today. Nginx script outputting to webpage but requires further debug.
+
+### Next steps
+
+1. test App2Db.yaml
+2. debug webpage stack
+3. generate a standalone VPC stack
+4. Generate an "All in one" stack
+5. Tidy and streamline final task 2 solution.
+
+---
