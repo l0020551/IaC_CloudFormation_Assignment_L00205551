@@ -1,0 +1,367 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Full VPC network for IaC_Assigment2vpc with public web, private app,
+  private RDS/backup subnets, NAT, routes, and security groups.
+  Cross-security-group rules are separate to avoid circular dependencies.
+
+Parameters:
+  DeveloperIP:
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  WebSSHIP:
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+
+Resources:
+  # VPC
+  IaCAssigment2VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: IaC_Assigment2vpc
+
+  # Internet gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ATU_MetApp
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref IaCAssigment2VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public subnet for the web tier
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref IaCAssigment2VPC
+      CidrBlock: 10.0.0.0/28
+      AvailabilityZone: eu-west-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: publicNet
+
+  # Private application subnet
+  PrivateAppSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref IaCAssigment2VPC
+      CidrBlock: 10.0.0.16/28
+      AvailabilityZone: eu-west-1a
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: PrivateAppNet
+
+  # Private database subnet in AZ a
+  PrivateRDSSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref IaCAssigment2VPC
+      CidrBlock: 10.0.0.32/28
+      AvailabilityZone: eu-west-1a
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: privateRDSnet
+
+  # Private database/backup subnet in AZ b
+  PrivateBackupSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref IaCAssigment2VPC
+      CidrBlock: 10.0.0.48/28
+      AvailabilityZone: eu-west-1b
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: privateBackupNet
+
+  # Optional, useful when adding an RDS DB instance later
+  RDSDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for RDS across two availability zones
+      SubnetIds:
+        - !Ref PrivateRDSSubnet
+        - !Ref PrivateBackupSubnet
+      Tags:
+        - Key: Name
+          Value: ATU_Met_RDS_SubnetGroup
+
+  # NAT gateway in public subnet
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: IaC_Assigment2vpc-NAT
+
+  # Public routes
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref IaCAssigment2VPC
+      Tags:
+        - Key: Name
+          Value: ATU_MET_Public
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private routes; preserves original NAT behavior for all private subnets
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref IaCAssigment2VPC
+      Tags:
+        - Key: Name
+          Value: MetPrivateRouteTable
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateAppSubnetRTAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateRDSSubnetRTAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateRDSSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateBackupSubnetRTAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateBackupSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Web server SG: preserve original HTTP/egress rules
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: WebServerSecurityGroup
+      GroupDescription: Allow HTTP traffic to the web server
+      VpcId: !Ref IaCAssigment2VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: WebServerSecurityGroup
+
+  # Developer DB SG: does not itself make a private RDS instance internet-accessible
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: DBSecurityGroup
+      GroupDescription: Allow PostgreSQL traffic from developer CIDR
+      VpcId: !Ref IaCAssigment2VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !Ref DeveloperIP
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: DBSecurityGroup
+
+  # Web front SG: preserve original HTTP, SSH and HTTPS egress
+  WebFrontSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: WebSG
+      GroupDescription: WebFrontSecurityGroup
+      VpcId: !Ref IaCAssigment2VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref WebSSHIP
+      SecurityGroupEgress:  ## for debug access to SSM. Remove for deployment!!!
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: WebSG
+
+  # Define App SG without referring to the RDS SG
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: AppSG
+      GroupDescription: SecurityGroupForApp
+      VpcId: !Ref IaCAssigment2VPC
+      SecurityGroupIngress:
+        # Original SSH access from web front; remove if using SSM only
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref WebFrontSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0  
+        - IpProtocol: tcp ## for debug access to SSM. Remove for deployment!!!
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: AppSG
+
+  # Define RDS SG independently (no App SG ref in its inline rules)
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ATU_Met_RDS
+      GroupDescription: Security group for PostgreSQL database
+      VpcId: !Ref IaCAssigment2VPC
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: ATU_Met_RDS
+
+  # Both SGs now exist; these standalone rules avoid a circular dependency
+  AppToRDSEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref RDSSecurityGroup
+
+  RDSFromAppIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RDSSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref IaCAssigment2VPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCId"
+
+  PublicSubnetId:
+    Description: Public Web Subnet ID
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetId"
+
+  PrivateAppSubnetId:
+    Description: Private App Subnet ID
+    Value: !Ref PrivateAppSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateAppSubnetId"
+
+  PrivateRDSSubnetId:
+    Description: Private RDS Subnet ID
+    Value: !Ref PrivateRDSSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateRDSSubnetId"
+
+  PrivateBackupSubnetId:
+    Description: Private Backup Subnet ID
+    Value: !Ref PrivateBackupSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateBackupSubnetId"
+
+  RDSDBSubnetGroupName:
+    Description: RDS DB Subnet Group name
+    Value: !Ref RDSDBSubnetGroup
+
+  WebServerSGId:
+    Description: Web Server Security Group ID
+    Value: !Ref WebServerSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-WebServerSGId"
+
+  WebFrontSGId:
+    Description: Web Front Security Group ID
+    Value: !Ref WebFrontSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-WebFrontSGId"
+
+  AppSGId:
+    Description: App Security Group ID
+    Value: !Ref AppSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AppSGId"
+
+  RDSSGId:
+    Description: RDS Security Group ID
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-RDSSGId"
+
+  DBSGId:
+    Description: DB Security Group ID
+    Value: !Ref DBSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-DBSGId"

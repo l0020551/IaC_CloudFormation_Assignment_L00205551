@@ -23,7 +23,7 @@ Parameters: ## using the same parameters as the latest cloudformations example
     MaxLength: '18'
     Default: 0.0.0.0/0
     AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$'
-    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x, use 0.0.0.0/0 for web exposure, your own IP address to only expose page to your PC.
     
   IDbucketName: ### add reference to existing S3 rather than enerating one that must thenbe populated
     Description: S3 bucket containing html with student name and ID

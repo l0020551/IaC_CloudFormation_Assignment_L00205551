@@ -233,7 +233,7 @@ Resources:
           FromPort: 22
           ToPort: 22
           CidrIp: !Ref WebSSHIP
-      SecurityGroupEgress:
+      SecurityGroupEgress:  ## for debug access to SSM. Remove for deployment!!!
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
@@ -260,8 +260,7 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-        # HTTPS for SSM (443, not 433)
-        - IpProtocol: tcp
+        - IpProtocol: tcp  ## for debug access to SSM. Remove for deployment!!!
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
