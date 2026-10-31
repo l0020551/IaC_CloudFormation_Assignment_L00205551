@@ -18,6 +18,8 @@ Parameters:
   S3BucketName:
     Type: String
     Description: 'The name of the existing S3 bucket containing your python script (e.g., my-weather-bucket)'
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be a valid lowercase S3 bucket name.
 
   PythonScriptName:
     Type: String
@@ -48,6 +50,7 @@ Parameters:
     Description: 'The password for your database user'
 
 Resources:
+
   # 1. IAM Role allowing EC2 to read from your specific S3 Bucket
   EC2S3ReadRole:
     Type: AWS::IAM::Role
@@ -60,6 +63,9 @@ Resources:
               Service: ec2.amazonaws.com
             Action:
               - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Add this block
+
       Policies:
         - PolicyName: S3BucketReadPolicy
           PolicyDocument:
@@ -71,7 +77,7 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - !Sub 'arn:aws:s3:::${S3BucketName}'
-                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*' 
 
   # 2. Instance Profile linking the IAM role to the EC2 Instance
   EC2InstanceProfile:

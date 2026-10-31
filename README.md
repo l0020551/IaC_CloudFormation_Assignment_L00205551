@@ -29,12 +29,12 @@ After reviewing and running the stack from this AWS-provided example (which can 
 ### Step 3: S3 integration
 **Date:** October 18th, 2026 
 
-Today, the S3 bucket will be integrated and a file's content concatanated to screen.
+Today, the S3 bucket will be integrated and a file's content concatenated to screen.
 
 As I have no background in web development and the "Hello World" content of the tutorial looks basic on the webpage, I prompted an LLM to generate a HTML document that will be retrieved from the S3 buckets. Here is the prompt content:
 
 ```
-I need a simple but cleanly designed HTML file. The file will just contain two lines of text in the header, the top line reading "Student: John Doe", the second line reading "Student ID: 123456789" , take liberties with remaining asthetic design
+I need a simple but cleanly designed HTML file. The file will just contain two lines of text in the header, the top line reading "Student: John Doe", the second line reading "Student ID: 123456789" , take liberties with remaining aesthetic design
 
 ```
 
@@ -100,7 +100,7 @@ It gave a clear answer: [amazoonQ  on VPCs](./screenshots/VPC_question_to_amazon
 
 On further prompting amazonQ, it gave me an example of implementing a VPC on a stack. The example of this can be found [here](./Scripts/Task2/SampleScripts/VPC.yaml) [AmazonQ_VPC_prompt2](./screenshots/AmazonQ_prompt2.png)
 
-On reviewing this script it has some useful content including VPC and database implementation. The script deviated on some points including using cloudfront for the web tier which is not nescessary for this application.
+On reviewing this script it has some useful content including VPC and database implementation. The script deviated on some points including using cloudfront for the web tier which is not necessary for this application.
 
 After probing the LLM further, a script close enough to the desired structure was generated. While it doesn't match, it contains the main building blocks that the final script should incorporate to run. This script can be found [here](./Scripts/Task2/SampleScripts/VPC2.yaml). Comments have been added for how these segments may fit together in the final script. 
 
@@ -110,45 +110,45 @@ After probing the LLM further, a script close enough to the desired structure wa
 ### Updates
 During the week Amazon gave a notification as follows:[aws_notification](./screenshots/aws_notification.png)
 
-The Linux version used in some scripts ran the previous week are out of support. The scripts need to be checked. 
-On reviewing active repository scripts the EC2instances are already running the AL2 successor; AL2023 or the latest Amazon image release `'/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'`.
+The Linux version used in some scripts ran the previous week is out of support. The scripts need to be checked. 
+On reviewing active repository scripts, the EC2instances are already running the AL2 successor; AL2023 or the latest Amazon image release `'/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'`.
 
 ### Update to task 1
 In the first working iteration, an s3 container is generated in the stack, The webpage html needs to be manually updated while the stack checks for an upload.
-This is inefficient. In the next iteration it will refence an exising s3 container. This will mean the userdata will not require a loop to check if a file has been added to the s3 bucket. Instead it will recall the file from an existing bucket. This script in this commit and push does this. 
+This is inefficient. In the next iteration, it will refence an existing s3 container. This will mean the userdata will not require a loop to check if a file has been added to the s3 bucket. Instead, it will recall the file from an existing bucket. This script is in this commit and push does this. 
 
 ### Task2 
-Last week a script with a VPC template was generated. now it will be implemented. As  mentioned in the previous section, application scripts will be recalled from an existing s3 bucket. 
+Last week, a script with a VPC template was generated. Now it will be implemented. As  mentioned in the previous section, application scripts will be recalled from an existing s3 bucket. 
 
-After spending hours debugging, the task has been broken down into to stages, 
- * Stage 1: GUI and appliation unning.
+After spending hours debugging, the task has been broken down into two stages, 
+ * Stage 1: GUI and application running.
  * Stage 2: database integration. 
 
 
-**Date:** October 25th, 2026  Recap:
+**Date:** October 25th, 2026,  Recap:
 
 * Updated task1 script to recall from existing s3 bucket.
 * Added parameters for s3 buckets in both scripts 
 * Reviewed instances and checked that they are still supported after notification from AWS.
 * Added more content for task2, html and python scripts etc. 
-* accessed ec2 terminal for debugging issues
+* Accessed ec2 terminal for debugging issues
 
 ### Next stage
  * Get python script running in EC2
- * push updates to webpage
- * push changes to database. 
+ * Push updates to webpage
+ * Push changes to database. 
  ---
 
  **Date:** October 26th, 2026
 
- After pushing changes yesterday, the task2 app was run locally, an SQL container, a python flask API webpage and a script to get and push data from met eireann to a database. Having it run locally with success, the next stage is to migrate it to the stack.
+ After pushing changes yesterday, the task2 app was run locally, an SQL container, a python flask API webpage and a script to get and push data from Met Eireann to a database. Having it run locally with success, the next stage is to migrate it to the stack.
  
  Today's plan:
- * load html of task 2 using task 1 as a reference
- * integrate database
- * add ec2 to poll met eireann and push to dbc.
+ * Load html of task 2 using task 1 as a reference
+ * Integrate database
+ * Add ec2 to poll Met Eireann and push to database.
 
- After multiple failed attempts, a more finite approach has been decided, a new folder called [StandaloneTiers](./Scripts/Task2/StandaloneTiers/) has been created. Each Teir will be worked on until all  three are configured and operating as desired. Once all three independent scripts are running, then will be integrated into a singular stack. 
+ After multiple failed attempts, a more finite approach has been decided. A new folder called [stand-alone Tiers](./Scripts/Task2/StandaloneTiers/) has been created. Each Teir will be worked on until all  three are configured and operating as desired. Once all three independent scripts are running, then they will be integrated into a singular stack. 
 
  First, a VPC was manually created for the application using the following steps from amazonQ 
 [pic1](./screenshots/Screenshot%20From%202026-10-26%2016-10-54.png)
@@ -157,11 +157,11 @@ After spending hours debugging, the task has been broken down into to stages,
 
 On generating the VPC, the manual scripts were run in the following order:
 1. Database (the application layer and web layer are dependent on this)
-2. Application layer (populate  the DBC with data)
-3. Web layer.
+2. Application layer (populate  the database with data)
+3. Web Layer.
 
-* The database standalone script runs.
-* After some debugging in the EC2 terminal the App standalone runs. the database needed to be decoupled and the met readings stored locally on the EC2 instance as an xml. [terminal debug](./screenshots/ec2_debug.png)
+* The database stand-alone script runs.
+* After some debugging in the EC2 terminal, the App stand-alone runs. The database needed to be decoupled, and the met readings stored locally on the EC2 instance as an xml. [terminal debug](./screenshots/ec2_debug.png)
 
 ### Next Steps
 
@@ -175,32 +175,32 @@ On generating the VPC, the manual scripts were run in the following order:
 
 **Date:** October 27th, 2026 
 
-* App ec2 stanalone has been debugged.
-* next step is RDS communication integration
+* App ec2 stand-alone has been debugged.
+* Next step is RDS communication integration
 For this AmazonQ was questioned: [aws ec2 to RDS comms](./screenshots/ec2_rds_connection.png)
 
 At this stage, after manually provisioning a VPC and debugging communication between the RDS and EC2 Instance, I am starting to understand how cloudformation stacks work. 
 
 * At this stage I have a standalone RDS stack, a standalone app and the two integrated.
 I have tidied the [App2Db.yaml](./Scripts/Task2/StandaloneTiers/App2Db.yaml) script. 
-The next steps will be to generate the overall stack for task2. 
+The next step will be to generate the overall stack for task2. 
 I think I will split this into two solutions:
-1. One stack that does everything; VPC and RDS generation etc. 
-2. Multi-stack solution; For real-world Ops I would partition the Database and VPC into there own stack as they are less ephemeral that the EC2 App and Web tiers. Rather than generate a new Database and VPC each stack call, existing istances can be called in paramters. 
+1. One stack that does everything; VPC and RDS generation, etc. 
+2. Multi-stack solution; For real-world Ops I would partition the Database and VPC into their own stack as they are less ephemeral than the EC2 App and Web tiers. Rather than generate a new Database and VPC for each stack call, existing instances can be called in parameters. 
 
 ### Next steps
 
 1. test App2Db.yaml
-2. Intergrate stanalone webpage stack
+2. Integrate stanalone webpage stack
 3. generate a standalone VPC stack
 4. Generate an "All in one" stack
-5. Tidy and streamline final task 2 solution.
+5. Tidy and streamline final task 2 solutions.
 
 ---
 
-**Date:** October 27th, 2026 
+**Date:** October 28th, 2026 
 
-Just did an hour of work today. Nginx script outputting to webpage but requires further debug.
+An hour of work on this project was done today. Nginx script outputs to webpage but requires further debugging.
 
 ### Next steps
 
@@ -208,6 +208,22 @@ Just did an hour of work today. Nginx script outputting to webpage but requires 
 2. debug webpage stack
 3. generate a standalone VPC stack
 4. Generate an "All in one" stack
-5. Tidy and streamline final task 2 solution.
+5. Tidy and streamline final task 2 solutions.
 
 ---
+
+**Date:** October 30th, 2026 
+
+I got amazonQ to generate a stack based on the VPC manually generated. Due to circular definitions with two tiers having overlapped inbound and outbound security group rules, it took some debugging to get the final stack to validate and deploy.
+---
+**Date:** October 30th, 2026 
+
+At this stage, I don't have time to debug the webapp.
+The plan is to deploy the standalone tiers individually and validating function before merging them into a single file and the alternative structure I would actually use for Ops.  
+
+Here are screenshots of the stand-alone deployments; the tiers require a VPC to interface so the VPC boots first. The database next as the app needs a database to write to, and the webpage needs to read from. [stack order](./screenshots/Screenshot%20From%202026-10-31%2010-24-57.png). A database and two EC2 instances are generated [ec2s](./screenshots/Screenshot%20From%202026-10-31%2010-25-20.png).
+
+Next, the real-world Ops folder will be implemented. This is where the three-tier system will be broken into three scripts, VPC, RDS, and operations. In a real-world scenario of this weather app, I think the database should not be tethered to the stack containing the EC2 app and web layers. In this use case data in the database would ideally persist through updates to the app and web implementation, if in the shared stack, deletion would wipe the database, backups of the database may be an option. Creating it separately once and pointing to it when deploying updates makes the most sense. The same logic stands for the VPC too.  
+
+
+

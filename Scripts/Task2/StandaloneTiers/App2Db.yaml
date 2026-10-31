@@ -55,6 +55,10 @@ Parameters:
     NoEcho: true
     Description: 'The database admin master password (Minimum 8 characters)'
     MinLength: 8
+    MaxLength: 30
+    AllowedPattern: '^(?=.*[A-Z])(?=.*[!@#$%^&*(),.?":{}|<>]).+$'
+    ConstraintDescription: Password must contain at least one uppercase letter and one special character.
+
 
   DBPort:
     Type: String
@@ -63,8 +67,8 @@ Parameters:
   
   DBHost:
     Type: String
-    Description: "Select or type the identifier of the existing RDS database instance."
-    Default: "my-production-db"
+    Description: "Select or type the identifier of the existing RDS database instance. Example xxxxxxxxxxxxxxxxx.rds.amazonaws.com"
+    Default: "met-rds"
 
   RDSsubnetHost:
     Type: AWS::EC2::Subnet::Id

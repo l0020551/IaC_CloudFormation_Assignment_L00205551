@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: CloudFormation Template for WebServer with Security Group and EC2 Instance
+Description: AWS CloudFormation Template for WebServer with Security Group and EC2 Instance-> https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/gettingstarted.walkthrough.html
 
 Parameters:
   LatestAmiId:

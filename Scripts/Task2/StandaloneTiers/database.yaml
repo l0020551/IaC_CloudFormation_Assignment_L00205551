@@ -60,7 +60,7 @@ Resources:
   DebugDatabase:
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceIdentifier: debug-existing-vpc-db
+      DBInstanceIdentifier: met-rds
       Engine: postgres
       EngineVersion: '15'
       DBInstanceClass: db.t4g.micro
