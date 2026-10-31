@@ -1,0 +1,353 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Stack for Web and app EC2s'
+
+Parameters:
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: Latest Amazon Linux 2023 AMI
+
+  AppSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: Select the existing private app subnet ID from the VPC stack
+
+  ExistingWebSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Select the existing public subnet ID from the VPC stack'
+
+  NginxPythonScriptName:
+    Type: String
+    Default: 'flaskWebpageUpdater.py'
+    Description: 'The name of the python file inside the bucket for web tier of system'
+
+  DBHost:
+    Type: String
+    Description: 'The Endpoint of the existing shared RDS instance in the separate stack, i.e. \"met-rds.xxxxxxx.eu-west-1.rds.amazonaws.com\"'
+
+  DBName:
+    Type: String
+    Default: met-rds
+    Description: 'The database name used by both the Web and App EC2 instances'
+
+  WebPageSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: "From VPC stack, please select WebServerSecurityGroup"
+    Description: "Select WebServerSecurityGroup"
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 30
+    AllowedPattern: '^(?=.*[A-Z])(?=.*[!@#$%^&*(),.?":{}|<>]).+$'
+    ConstraintDescription: Password must contain at least one uppercase letter and one special character.
+    Description: "Password for Database, the database admin master password (Minimum 8 characters)."
+
+  WebInstanceType:   ### app and web ec2 instances are parsed 
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t3.micro
+      - t2.micro
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+  AppInstanceType: ### app and web ec2 instances are parsed 
+    Description: AppServer EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t3.micro
+      - t2.micro
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+  IDbucketName:
+    Description: Existing S3 bucket containing the application files
+    Type: String
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be a valid lowercase S3 bucket name.
+
+  DBUsername:
+    Type: String
+    Default: dbadmin
+    Description: 'The database username shared by the two EC2 applications'
+
+  DBPort:
+    Type: String
+    Default: 5432
+    Description: 'Port for the existing RDS database (5432 for PostgreSQL, 3306 for MySQL)'
+  
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: "Select an existing App Security Group."
+
+Resources:
+
+  # 1. IAM Role allowing EC2 to read from your specific S3 Bucket
+  EC2S3ReadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Add this block
+
+      Policies:
+        - PolicyName: S3BucketReadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${IDbucketName}'
+                  - !Sub 'arn:aws:s3:::${IDbucketName}/*' 
+
+  AppServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ReadWebsiteContent
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${IDbucketName}'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${IDbucketName}/*'
+
+  AppServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppServerRole
+  
+  AppServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref AppInstanceType
+      IamInstanceProfile: !Ref AppServerInstanceProfile
+      SubnetId: !Ref AppSubnet
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Tier2 App Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -Eeuxo pipefail
+
+          exec > >(tee -a /var/log/user-data.log) 2>&1
+          trap 'rc=$?; echo "ERROR: line $LINENO, exit code $rc"' ERR
+
+          export AWS_DEFAULT_REGION=${AWS::Region}
+
+          echo "=== User data started: $(date -Is) ==="
+          cat /etc/os-release
+
+          yum update -y
+          yum install -y httpd awscli python3 python3-pip
+
+          # Fixed Amazon Linux 2 PostgreSQL clean installation sequence
+          sudo yum clean all
+          sudo amazon-linux-extras enable postgresql14
+          sudo yum install -y postgresql
+
+          # Fixed syntax typo mapping variable assignments
+          export DB_HOST="${DBHost}"
+          export DB_USER="${DBUsername}"
+          export DB_PASSWORD="${DBPassword}"
+          export DB_NAME="${DBName}"
+          export DB_PORT="${DBPort}"
+
+          mkdir -p /var/app/opt
+
+          DOWNLOADED=false
+          for i in {1..6}; do
+            if aws s3 cp "s3://${IDbucketName}/met_weather.py" /var/app/met_weather.py && \
+               aws s3 cp "s3://${IDbucketName}/requirements.txt" /var/app/requirements.txt; then
+              DOWNLOADED=true
+              break
+            fi
+            echo "S3 download attempt $i failed; retrying..."
+            sleep 10
+          done
+
+          if [ "$DOWNLOADED" != true ]; then
+            echo "ERROR: Failed to download application files from S3."
+            exit 1
+          fi
+
+          chmod 644 /var/app/met_weather.py /var/app/requirements.txt
+          
+          python3 -m venv /var/app/venv
+          /var/app/venv/bin/python -m pip install -r /var/app/requirements.txt
+
+          chown -R ec2-user:ec2-user /var/app
+
+          # Run the app as a managed service
+          cat > /etc/systemd/system/standalone-app.service <<'SERVICE'
+          [Unit]
+          Description=Standalone Forecast Application
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=ec2-user
+          WorkingDirectory=/var/app
+          ExecStart=/var/app/venv/bin/python -u /var/app/met_weather.py
+          Restart=on-failure
+          RestartSec=5
+          StandardOutput=append:/var/log/standalone-app.log
+          StandardError=append:/var/log/standalone-app.log
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl daemon-reload
+          systemctl enable --now standalone-app.service
+          systemctl enable --now httpd
+
+          echo "=== User data completed: $(date -Is) ==="
+
+
+  # Web EC2 Instance to Host the Server & Proxy
+
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2S3ReadRole
+
+
+  WeatherAppServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref WebInstanceType
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref ExistingWebSubnet
+          GroupSet:
+            - !Ref WebPageSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: Tier1 Web Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # 1. Update system and install Python, GCC, and Nginx
+          dnf update -y
+          dnf install -y python3-pip python3-devel gcc nginx
+
+          # 2. Install Flask and PyMySQL dependencies
+          pip3 install flask pymysql
+
+          # 3. Create the app directory and download the script from S3
+          mkdir -p /opt/weather-app
+          aws s3 cp s3://${IDbucketName}/${NginxPythonScriptName} /opt/weather-app/app.py
+
+          # 4. Ensure the script binds to localhost (127.0.0.1) since Nginx handles public traffic
+          sed -i "s/'0.0.0.0'/'127.0.0.1'/g" /opt/weather-app/app.py
+          sed -i 's/"0.0.0.0"/"127.0.0.1"/g' /opt/weather-app/app.py
+
+          # 5. Export configuration environment variables
+          export DB_HOST="${DBHost}"
+          export DB_USER="${DBUsername}"
+          export DB_PASSWORD="${DBPassword}"
+          export DB_NAME="${DBName}"
+          export DB_PORT="${DBPort}"
+
+          # 6. Configure Nginx as a Reverse Proxy to Port 5000
+          cat << 'EOF' > /etc/nginx/conf.d/weather_app.conf
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          EOF
+
+          # 7. Start and enable Nginx service
+          systemctl start nginx
+          systemctl enable nginx
+
+          # 8. Execute Flask application in the background (Defaulting to port 5000)
+          nohup python3 /opt/weather-app/app.py > /var/log/weather-app.log 2>&1 &
+
+  # CloudFront Distribution Layer
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        Comment: 'Public Global CDN Cache layer for Weather App'
+        Origins:
+          - Id: CustomEC2Origin
+            DomainName: !GetAtt WeatherAppServer.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: CustomEC2Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: all
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+
+Outputs:
+  PublicWebpageUrl:
+    Description: CloudFront HTTPS URL for the web application
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'

@@ -4,19 +4,23 @@ Description: 'AWS Stack: Deploying an RDS PostgreSQL Database inside an Existing
 Parameters:
   ExistingVpcId:
     Type: AWS::EC2::VPC::Id
+    Default: IaC_Assigment2vpc
     Description: 'Select your existing active VPC ID'
 
   ExistingSubnetA:
     Type: AWS::EC2::Subnet::Id
+    Default: privateRDSnet
     Description: 'Select the first public subnet ID inside that VPC'
 
   ExistingSubnetB:
     Type: AWS::EC2::Subnet::Id
+    Default: privateBackupNet
     Description: 'Select a second public subnet ID inside that VPC (Must be a different Availability Zone)'
   
-  DBExistingSG:
-    Type: List<AWS::EC2::SecurityGroup::Id>
-    Description: 'Select SecurityGroup for database'
+  DBExistingSGId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: ATU_Met_RDS
+    Description: 'Select a single active Security Group ID for the database'
 
   DBUsername:
     Type: String
@@ -26,8 +30,11 @@ Parameters:
   DBPassword:
     Type: String
     NoEcho: true
-    Description: 'The database admin master password (Minimum 8 characters)'
     MinLength: 8
+    MaxLength: 30
+    AllowedPattern: '^(?=.*[A-Z])(?=.*[!@#$%^&*(),.?":{}|<>]).+$'
+    ConstraintDescription: Password must contain at least one uppercase letter and one special character.
+    Description: Password for Database
 
   YourIPAddress:
     Type: String
@@ -44,13 +51,13 @@ Resources:
         - !Ref ExistingSubnetA
         - !Ref ExistingSubnetB
 
-  # 2. Creates a specific firewall rule attached to your existing VPC
+  # 2. Creates a specific isolated debugging firewall rule attached to your existing VPC
   DBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: 'Allow SQL Console inbound traffic from Developer IP'
       VpcId: !Ref ExistingVpcId
-      SecurityGroupInboundRules:
+      SecurityGroupIngress: # Fixed from SecurityGroupInboundRules
         - IpProtocol: tcp
           FromPort: 5432
           ToPort: 5432
@@ -60,7 +67,7 @@ Resources:
   DebugDatabase:
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceIdentifier: debug-existing-vpc-db
+      DBInstanceIdentifier: met-rds
       Engine: postgres
       EngineVersion: '15'
       DBInstanceClass: db.t4g.micro
@@ -70,7 +77,8 @@ Resources:
       PubliclyAccessible: true  # Instructs AWS to assign a routeable public IP
       DBSubnetGroupName: !Ref DBSubnetGroup
       VPCSecurityGroups:
-        - !Ref DBExistingSG #GetAtt DBSecurityGroup.GroupId
+        - !Ref DBExistingSGId        # Your selected baseline security group
+        - !GetAtt DBSecurityGroup.GroupId  # The specific developer IP bypass group built above
       DeletionProtection: false
 
 Outputs:
